@@ -20,6 +20,8 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 
+from ryu.lib.packet import packet, ethernet, ethernet, arp
+
 
 class LearningSwitch(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -28,7 +30,9 @@ class LearningSwitch(app_manager.RyuApp):
         super(LearningSwitch, self).__init__(*args, **kwargs)
 
         # Here you can initialize the data structures you want to keep at the controller
-        
+        self.data_plane = {}
+        self.known_ips = {}
+
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -57,8 +61,100 @@ class LearningSwitch(app_manager.RyuApp):
     # Handle the packet_in event
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
-        
         msg = ev.msg
         datapath = msg.datapath
 
-        # Your controller implementation should start here
+        of_proto = datapath.ofproto
+        of_parser = datapath.ofproto_parser
+        dp_id = datapath.id
+        source_port = msg.match['in_port']
+    
+        # create a packet using the event raw data
+        pkt = packet.Packet(msg.data)
+        pkt_header = pkt.get_protocols(ethernet.ethernet)
+
+        try:
+            ethernet_test = pkt_header[0]
+
+        except:
+            pass
+
+
+        # TODO: Check if request header has 'arp' key
+        if ethernet_test.ethertype == 2054:
+            arp_info = pkt.get_protocols(arp.arp)[0]
+            src_ip = arp_info.src_ip
+            dst_ip = arp_info.dst_ip
+
+            self.logger.info("arp packet info: %s", arp_info)
+            self.known_ips.setdefault(dp_id, "")
+            self.known_ips[dp_id] = dst_ip
+            
+            # Logg info for verification
+            self.logger.info('ARP packket in from %s to %s line %s', src_ip, dst_ip, dp_id)
+            
+            if self.known_ips[dp_id] == dst_ip:
+                new_dest_ip = dst_ip
+
+            else:
+                self.logger.info('destingation subnet not found so flooding ->>')
+                new_dest_ip = of_proto.OFPP_FLOOD
+
+            self.logger.info('ip to be formed', new_dest_ip)
+
+
+            # In every case we create a flow
+            actions = of_proto.OFPP_NORMAL
+
+            if new_dest_ip != of_proto.OFPP_FLOOD:
+                match = of_parser.OFPMatch(ipv4_src=src_ip)
+                self.add_flow(datapath, 1, match, actions)
+            else:
+                match = of_parser.OFPMatch()
+                self.add_flow(datapath, 0, match, actions)
+
+        else:
+            # no: check dest_mac in data_plane:
+
+            source_port = msg.match['in_port']
+            # get ethernet header
+            eth_header = pkt.get_protocols(ethernet.ethernet)[0]
+
+            # source and destination macs
+            source_mac = eth_header.src
+            dest_mac = eth_header.dst
+
+            # Add a new structure for the dataplane entries
+            self.data_plane.setdefault(dp_id, {})
+            
+            # Logg info for verification
+            self.logger.info('Incoming packket in data path %s from %s to %s in_port %s',
+                              dp_id, source_mac, dest_mac, source_port)
+            
+            # assign the inport of the source switch in datapatch
+            # self-learning - avoid flooding
+            self.data_plane[dp_id][source_mac] = source_port
+            
+            if dest_mac in self.data_plane[dp_id]:
+                dest_port = self.data_plane[dp_id][dest_mac]
+
+            else:
+
+                self.logger.info('destingation mac not found back to controller ->>')
+                dest_port = of_proto.OFPP_FLOOD
+
+            # We have a record for the destination so we create an action
+            actions = [of_parser.OFPActionOutput(dest_port)]
+
+            # we are not flooding so we implement a soruce port match for the switch
+            # and set its priority
+            if dest_port != of_proto.OFPP_FLOOD:
+                match = of_parser.OFPMatch(in_port=source_port)
+                self.add_flow(datapath, 1, match, actions)
+            else:
+                match = of_parser.OFPMatch()
+                self.add_flow(datapath, 0, match, actions)
+
+        
+        self.logger.info("known macs %s", self.data_plane)
+        self.logger.info("known ips %s", self.known_ips)
