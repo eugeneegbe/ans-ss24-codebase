@@ -41,9 +41,10 @@ class NetworkTopo(Topo):
         ext= self.addHost('ext', ip='192.168.1.123/24', defaultRoute='via 192.169.1.1')
 
         # Add switches
+        s3 = self.addSwitch('s3') # router
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
-        s3 = self.addSwitch('s3') # router
+
 
         # Add host links
         self.addLink(h1, s1,  cls=TCLink, bw=15, delay=10)
@@ -52,8 +53,8 @@ class NetworkTopo(Topo):
         self.addLink(ext, s3, cls=TCLink, bw=15, delay=10)
 
         # Add switch links
+        self.addLink(s2, s3, cls=TCLink, bw=15, delay=10)
         self.addLink(s1, s3, cls=TCLink, bw=15, delay=10)
-        self.addLink(s2, s3, cls=TCLink, bw=15, delay=10)             
 
 
 def run():

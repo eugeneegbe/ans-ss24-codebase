@@ -20,7 +20,7 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 
-from ryu.lib.packet import packet, ethernet, arp, ipv4, ether_types
+from ryu.lib.packet import packet, ethernet, arp, ipv4, ether_types, icmp
 from ryu.ofproto import ether
 
 class LearningSwitch(app_manager.RyuApp):
@@ -83,6 +83,10 @@ class LearningSwitch(app_manager.RyuApp):
 
         # create packet from message data
         pkt = packet.Packet(msg.data)
+        
+        # icmp generated when host ping its own gateway
+        icmp_pkt = pkt.get_protocol(icmp.icmp)
+        self.logger.info('icmp: %s', pkt)
 
         # extract the src
         # dest mac addresses from the ethernet protocol layer
@@ -92,11 +96,6 @@ class LearningSwitch(app_manager.RyuApp):
 
         dpid = datapath.id
         in_port = msg.match['in_port']
-
-
-        self.logger.info('switch Learnt Mac and ports %s', self.mac_to_port)
-        self.logger.info('Learnt gateway Ips port match %s', self.ip_to_mac)
-        self.logger.info('Learnt IP -> MAC %s', self.ip_to_mac)
 
         # If it's a switch (s1 or s2): act as learning switch
         # Use datapath 1 and 2
@@ -129,7 +128,6 @@ class LearningSwitch(app_manager.RyuApp):
                 # ARP - REQUEST
                 if arp_pkt.opcode == arp.ARP_REQUEST:
                     self.handle_arp_request(datapath, in_port, eth, arp_pkt)
-
                     return
 
                 # ARP - REPLY
@@ -173,6 +171,40 @@ class LearningSwitch(app_manager.RyuApp):
                     )
                     self.add_flow(datapath, 10, match, actions)
 
+            
+            # Host trying to test its own gateway with ICMP
+            if icmp_pkt:
+                self.logger.info('checking %s ', self.port_to_own_ip.items())
+                ip_pkt = pkt.get_protocol(ipv4.ipv4)
+                src_mac = None
+                if ip_pkt and ip_pkt.dst in self.port_to_own_ip.values():
+                    for p, ip in self.port_to_own_ip.items():
+                        if ip == ip_pkt.dst:
+                            src_mac = self.port_to_own_mac[p]
+                            self.logger.info('Mac port found  %s, %s', src_mac, p)
+
+                    eth_p = ethernet.ethernet(dst=eth.src, src=src_mac, ethertype=eth.ethertype)
+                    ip = ipv4.ipv4(dst=ip_pkt.src, src=ip_pkt.dst, proto=ip_pkt.proto)
+                    icmp_reply = icmp.icmp(type_=0, code=0, csum=0, data=icmp_pkt.data)
+                    pkt = packet.Packet()
+                    pkt.add_protocol(eth_p)
+                    pkt.add_protocol(ip)
+                    pkt.add_protocol(icmp_reply)
+                    pkt.serialize()
+
+                    actions = [of_parser.OFPActionOutput(p)]
+                    out = of_parser.OFPPacketOut(
+                        datapath=datapath,
+                        buffer_id=0xffffffff,
+                        in_port=datapath.ofproto.OFPP_CONTROLLER,
+                        actions=actions,
+                        data=pkt.data
+                    )
+                    datapath.send_msg(out)
+
+        self.logger.info('switch Learnt Mac and ports %s', self.mac_to_port)
+        self.logger.info('Learnt gateway Ips port match %s', self.ip_to_mac)
+        self.logger.info('Learnt IP -> MAC %s', self.ip_to_mac)
 
     def handle_arp_request(self, datapath, port, eth, arp_pkt):
         """
